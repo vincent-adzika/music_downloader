@@ -2,6 +2,8 @@ import sys
 import subprocess
 import os
 
+from dotenv import load_dotenv
+
 def check_and_install_requirements():
     req_file = os.path.join(os.path.dirname(__file__), "requirements.txt")
     if not os.path.exists(req_file):
@@ -16,6 +18,7 @@ def check_and_install_requirements():
         sys.exit(1)
 
 check_and_install_requirements()
+load_dotenv()
 print("🚀 Starting the music downloader bot...")
 
 import os
@@ -44,11 +47,11 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Telegram Bot Token
-TELEGRAM_BOT_TOKEN = '8456043417:AAEF6MPYYvvVPt7KXP_q6kmTD-FxAaRw2vw'
+TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 
 # Spotify API credentials
-SPOTIFY_CLIENT_ID = '6ed33e5dc63e48de9475e94addd5a813'
-SPOTIFY_CLIENT_SECRET = 'ebf33379f33246fdb5a63d5335eac1c4'
+SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
+SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
 # Set up Spotify client
 def setup_spotify_client():
