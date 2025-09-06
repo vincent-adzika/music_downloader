@@ -1,0 +1,12 @@
+# .dockerignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+*.sqlite3
+*.db
+.DS_Store
+.git
+.gitignore
+Procfile
