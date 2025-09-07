@@ -1,3 +1,17 @@
+from flask import Flask
+from threading import Thread
+
+app = Flask('')
+
+@app.route('/')
+def home():
+    return "✅ Bot is alive!"
+
+def run_flask():
+    app.run(host="0.0.0.0", port=8080)
+
+# Start the Flask server in a separate thread
+Thread(target=run_flask).start()
 import sys
 import subprocess
 import os
@@ -50,8 +64,8 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 
 # Spotify API credentials
-SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
-SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
+SPOTIFY_CLIENT_ID = os.environ.get('SPOTIPY_CLIENT_ID')
+SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIPY_CLIENT_SECRET')
 
 # Set up Spotify client
 def setup_spotify_client():
