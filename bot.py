@@ -1,3 +1,5 @@
+# Pagination state for each user
+user_search_state = {}
 from flask import Flask
 from threading import Thread
 
@@ -63,9 +65,8 @@ logger = logging.getLogger(__name__)
 # Telegram Bot Token
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 
-# Spotify API credentials
-SPOTIFY_CLIENT_ID = os.environ.get('SPOTIPY_CLIENT_ID')
-SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIPY_CLIENT_SECRET')
+SPOTIFY_CLIENT_ID = os.environ.get('SPOTIFY_CLIENT_ID')
+SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 
 # Set up Spotify client
 def setup_spotify_client():
@@ -136,14 +137,14 @@ def search_youtube_fast(query):
         'extract_flat': True,
         'force_json': True,
         'ignoreerrors': True,
-        'default_search': 'ytsearch10',  # Search top 10 results
+    'default_search': 'ytsearch50',  # Search top 50 results
         'noplaylist': True,
     }
 
     try:
         logger.warning(f"Starting YouTube search for query: '{query}'")
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"ytsearch10:{query}", download=False)
+            info = ydl.extract_info(f"ytsearch50:{query}", download=False)
             logger.warning(f"yt-dlp returned info: {info}")
             if info and 'entries' in info and info['entries']:
                 query_lower = query.lower()
@@ -412,9 +413,14 @@ async def download_spotify_playlist_fast(playlist_url, update, processing_msg):
         )
         playlist_id = playlist_url.split('/playlist/')[-1].split('?')[0]
         playlist = sp.playlist(playlist_id)
+        playlist_name = playlist.get('name', 'Spotify Playlist')
         tracks = playlist['tracks']['items']
         total = len(tracks)
         track_files = []
+        await processing_msg.edit_text(
+            f"🔍 Searching on YouTube for *{playlist_name}*...",
+            parse_mode='Markdown'
+        )
         for idx, item in enumerate(tracks, 1):
             track = item['track']
             track_url = f"https://open.spotify.com/track/{track['id']}"
@@ -431,6 +437,7 @@ async def download_spotify_playlist_fast(playlist_url, update, processing_msg):
             f"✅ *Playlist Downloaded!* \n\nSending all {len(track_files)} tracks...",
             parse_mode='Markdown'
         )
+        # Send all files only after all downloads are complete
         for file_path, name, artist in track_files:
             try:
                 with open(file_path, 'rb') as audio_file:
@@ -491,7 +498,7 @@ I quickly download music from Spotify and YouTube Music!
 • Music title or artist search
 
 
-📝 *Just send me a link!*
+📝 *Just send me a link!  or a name!*
 
 ⚡ *Optimized for speed!*
     """
@@ -526,11 +533,11 @@ async def search_and_select_youtube(update, processing_msg, query):
             'extract_flat': True,
             'force_json': True,
             'ignoreerrors': True,
-            'default_search': 'ytsearch10',
+            'default_search': 'ytsearch50',
             'noplaylist': True,
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(f"ytsearch10:{query}", download=False)
+            info = ydl.extract_info(f"ytsearch50:{query}", download=False)
         logger.warning(f"yt-dlp raw info for search: {info}")
         if not info or 'entries' not in info or not info['entries']:
             await processing_msg.edit_text(
@@ -539,15 +546,51 @@ async def search_and_select_youtube(update, processing_msg, query):
             )
             return None
         results = info['entries']
-        msg_text = "\n".join([
-            f"{i+1}. {entry.get('title', 'Unknown')} | {entry.get('uploader', 'Unknown Artist')} | {int(entry.get('duration', 0))//60}:{int(entry.get('duration', 0))%60:02d} min"
-            for i, entry in enumerate(results)
-        ])
+        user_id = update.effective_user.id
+        user_search_state[user_id] = {
+            'results': results,
+            'page': 0
+        }
+        return await send_search_page(update, processing_msg, user_id)
+
+    except Exception as e:
+        logger.error(f"Error searching YouTube: {e}")
+        
+
+# Helper to send a page of search results
+async def send_search_page(update, processing_msg, user_id):
+    try:
+        state = user_search_state[user_id]
+        results = state['results']
+        page = state['page']
+        page_size = 10
+        start = page * page_size
+        end = start + page_size
+        page_results = results[start:end]
+        def escape_md(text):
+            # Telegram Markdown V2 escaping
+            if not text:
+                return ''
+            return re.sub(r'([_\*\[\]()~`>#+\-=|{}.!])', r'\\\1', str(text))
+
+        msg_lines = [
+            f"*{start + i + 1}.*\n  🎵 *Title:* {escape_md(entry.get('title', 'Unknown'))}\n  👤 *Artist:* {escape_md(entry.get('uploader', 'Unknown Artist'))}\n  ⏱️ *Duration:* {int(entry.get('duration', 0))//60}:{int(entry.get('duration', 0))%60:02d} min\n" + ("────────────────────────────" if i < len(page_results)-1 else "")
+            for i, entry in enumerate(page_results)
+        ]
+        msg_lines.append("Send a number to download, 'all' to download all, or use the 'discard' button to cancel.")
         from telegram import InlineKeyboardButton, InlineKeyboardMarkup
-        keyboard = [[InlineKeyboardButton("Discard", callback_data="discard_search")]]
+        keyboard = []
+        # Previous page button
+        if page > 0:
+            keyboard.append([InlineKeyboardButton("← Previous page", callback_data="prev_page")])
+        # Next page button (always show unless on last page)
+        if end < len(results) or page == 0:
+            keyboard.append([InlineKeyboardButton("Next page →", callback_data="next_page")])
+        # Discard button
+        keyboard.append([InlineKeyboardButton("Discard", callback_data="discard_search")])
         reply_markup = InlineKeyboardMarkup(keyboard)
         await processing_msg.edit_text(
-            f"*Select a song by number:*\n\n{msg_text}\n\nReply with the number of the song you want to download.",
+            f"*Select a song by number:*\n\n" + "\n".join(msg_lines),
             parse_mode='Markdown',
             reply_markup=reply_markup
         )
@@ -561,65 +604,232 @@ async def search_and_select_youtube(update, processing_msg, query):
         return None
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message_text = update.message.text
+    if 'open.spotify.com' in message_text and '/artist/' in message_text:
+        artist_id = message_text.split('/artist/')[-1].split('?')[0]
+        artist = sp.artist(artist_id)
+        artist_name = artist.get('name', 'Spotify Artist')
+        # Get all albums (album, single, compilation)
+        albums = []
+        seen_album_ids = set()
+        results = sp.artist_albums(artist_id, album_type='album,single,compilation', limit=50)
+        while True:
+            for album in results['items']:
+                if album['id'] not in seen_album_ids:
+                    albums.append(album)
+                    seen_album_ids.add(album['id'])
+            if results['next']:
+                results = sp._get(results['next'])
+            else:
+                break
+        # Get all tracks from all albums
+        all_tracks = []
+        for album in albums:
+            album_tracks = sp.album_tracks(album['id'])
+            tracks = album_tracks['items']
+            next_url = album_tracks['next']
+            while next_url:
+                next_tracks = sp._get(next_url)
+                tracks.extend(next_tracks['items'])
+                next_url = next_tracks['next']
+            for track in tracks:
+                all_tracks.append({
+                    'url': f"https://open.spotify.com/track/{track['id']}",
+                    'title': track['name'],
+                    'uploader': artist_name,
+                    'duration': int(track['duration_ms']) // 1000,
+                    'album': album.get('name', 'Unknown Album')
+                })
+        # Prepare results for user selection
+        user_id = update.effective_user.id
+        user_search_state[user_id] = {
+            'results': all_tracks,
+            'page': 0,
+            'artist_name': artist_name
+        }
+        processing_msg = await update.message.reply_text(
+            f"*{artist_name}*\n\nSelect tracks to download by replying with numbers (e.g. 1,2,3) or 'all' to download all.\n\nListing all {len(all_tracks)} tracks from all albums and singles...",
+            parse_mode='Markdown'
+        )
+        await send_search_page(update, processing_msg, user_id)
+        return
     user = update.effective_user
     message_text = update.message.text
     logger.info(f"Received message from {user.first_name}: {message_text}")
     # Quick link check
     if not any(domain in message_text for domain in ['open.spotify.com', 'youtube.com', 'youtu.be', 'music.youtube.com']):
-        # If user has search results and sends a number, treat as selection
-        if 'yt_search_results' in context.user_data and message_text.strip().isdigit():
-            number = int(message_text.strip())
-            results = context.user_data['yt_search_results']
-            if 1 <= number <= len(results):
-                entry = results[number-1]
-                url = entry.get('url')
-                name = entry.get('title', 'Unknown')
-                artist = entry.get('uploader', 'Unknown Artist')
-                duration = int(entry.get('duration', 0) or 0)
-                msg = await update.message.reply_text(
-                    f"⬇️ Downloading `{name}` by {artist} ({duration//60}:{duration%60:02d} min)...",
-                    parse_mode='Markdown'
-                )
-                # Download and send
-                with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_file:
-                    output_path = tmp_file.name
-                success = await run_in_executor(download_audio_fast, url, output_path)
-                if success:
-                    with open(output_path, 'rb') as audio_file:
-                        await update.message.reply_audio(
-                            audio=audio_file,
-                            title=name[:64],
-                            performer=artist[:64],
-                            caption=f"🎵 *{name}* by {artist}",
-                            parse_mode='Markdown',
-                            filename=f"{sanitize_filename(artist)} - {sanitize_filename(name)}.mp3"
-                        )
+        user_id = update.effective_user.id
+        # If user has paginated search results
+        if user_id in user_search_state:
+            state = user_search_state[user_id]
+            results = state['results']
+            page = state['page']
+            page_size = 10
+            start = page * page_size
+            end = start + page_size
+            page_results = results[start:end]
+            text = message_text.strip().lower()
+            # Download all
+            if text == 'all':
+                indices = range(1, len(results)+1)
+            else:
+                # Check for comma-separated numbers
+                if ',' in text:
                     try:
-                        os.unlink(output_path)
+                        indices = [int(x.strip()) for x in text.split(',') if x.strip().isdigit() and 1 <= int(x.strip()) <= len(results)]
+                    except Exception:
+                        indices = []
+                elif text.isdigit():
+                    indices = [int(text)] if 1 <= int(text) <= len(results) else []
+                else:
+                    indices = []
+
+            if indices:
+                total = len(indices)
+                file_queue = []
+                for idx, number in enumerate(indices, 1):
+                    entry = results[number-1]
+                    url = entry.get('url')
+                    name = entry.get('title', 'Unknown')
+                    artist = entry.get('uploader', 'Unknown Artist')
+                    duration = int(entry.get('duration', 0) or 0)
+                    msg = await update.message.reply_text(
+                        f"⬇️ Downloading `{name}` by {artist} ({idx}/{total})...",
+                        parse_mode='Markdown'
+                    )
+                    with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_file:
+                        output_path = tmp_file.name
+                    # Retry download up to 3 times
+                    download_success = False
+                    for attempt in range(3):
+                        try:
+                            success = await run_in_executor(download_audio_fast, url, output_path)
+                            if success:
+                                download_success = True
+                                break
+                        except Exception:
+                            pass
+                    if download_success:
+                        file_queue.append((output_path, name, artist))
+                        await msg.edit_text(
+                            f"✅ *Done!* \n\nWaiting for all downloads to finish...",
+                            parse_mode='Markdown'
+                        )
+                    else:
+                        await msg.edit_text(
+                            f"❌ *Download failed for* `{name}` by {artist} after several attempts. Skipping.",
+                            parse_mode='Markdown'
+                        )
+                # Send all files only after all downloads are complete
+                for idx, (file_path, name, artist) in enumerate(file_queue, 1):
+                    # Retry send up to 3 times
+                    send_success = False
+                    for attempt in range(3):
+                        try:
+                            with open(file_path, 'rb') as audio_file:
+                                await update.message.reply_audio(
+                                    audio=audio_file,
+                                    title=name[:64],
+                                    performer=artist[:64],
+                                    caption=f"🎵 *{name}* by {artist} ({idx}/{len(file_queue)})",
+                                    parse_mode='Markdown',
+                                    filename=f"{sanitize_filename(artist)} - {sanitize_filename(name)}.mp3"
+                                )
+                            send_success = True
+                            break
+                        except Exception as send_err:
+                            logger.error(f"Error sending audio: {send_err}")
+                    try:
+                        os.unlink(file_path)
                     except:
                         pass
-                await msg.edit_text(
-                    f"✅ *Done!* \n\nSend another name or link! 🎧",
-                    parse_mode='Markdown'
-                )
-                # Clear search results
-                context.user_data.pop('yt_search_results', None)
-            else:
-                await update.message.reply_text(
-                    "❌ Invalid number. Please reply with a valid song number.",
-                    parse_mode='Markdown'
-                )
-            return
+                    if not send_success:
+                        await update.message.reply_text(
+                            f"❌ *Failed to send* `{name}` by {artist} after several attempts.",
+                            parse_mode='Markdown'
+                        )
+                # Send all files only after all downloads are complete
+                for file_path, name, artist in file_queue:
+                    try:
+                        with open(file_path, 'rb') as audio_file:
+                            await update.message.reply_audio(
+                                audio=audio_file,
+                                title=name[:64],
+                                performer=artist[:64],
+                                caption=f"🎵 *{name}* by {artist}",
+                                parse_mode='Markdown',
+                                filename=f"{sanitize_filename(artist)} - {sanitize_filename(name)}.mp3"
+                            )
+                        try:
+                            os.unlink(file_path)
+                        except:
+                            pass
+                    except Exception as send_err:
+                        logger.error(f"Error sending audio: {send_err}")
+                del user_search_state[user_id]
+                return
+            # Discard
+            if text == 'discard':
+                del user_search_state[user_id]
+                await update.message.reply_text("Search discarded. Send a new song or artist name.")
+                return
+            # Next page
+            if text.isdigit():
+                number = int(text)
+                # Next page logic (if not on last page)
+                if number == end + 1 and end < len(results):
+                    state['page'] += 1
+                    processing_msg = await update.message.reply_text("Next page...", parse_mode='Markdown')
+                    await send_search_page(update, processing_msg, user_id)
+                    return
+                # Download single by absolute number
+                if 1 <= number <= len(results):
+                    entry = results[number-1]
+                    url = entry.get('url')
+                    name = entry.get('title', 'Unknown')
+                    artist = entry.get('uploader', 'Unknown Artist')
+                    duration = int(entry.get('duration', 0) or 0)
+                    msg = await update.message.reply_text(
+                        f"⬇️ Downloading `{name}` by {artist} ({duration//60}:{duration%60:02d} min)...",
+                        parse_mode='Markdown'
+                    )
+                    with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_file:
+                        output_path = tmp_file.name
+                    success = await run_in_executor(download_audio_fast, url, output_path)
+                    if success:
+                        with open(output_path, 'rb') as audio_file:
+                            await update.message.reply_audio(
+                                audio=audio_file,
+                                title=name[:64],
+                                performer=artist[:64],
+                                caption=f"🎵 *{name}* by {artist}",
+                                parse_mode='Markdown',
+                                filename=f"{sanitize_filename(artist)} - {sanitize_filename(name)}.mp3"
+                            )
+                        try:
+                            os.unlink(output_path)
+                        except:
+                            pass
+                    await msg.edit_text(
+                        f"✅ *Done!* \n\nSend another name or link! 🎧",
+                        parse_mode='Markdown'
+                    )
+                    del user_search_state[user_id]
+                    return
+                else:
+                    await update.message.reply_text(
+                        "❌ Invalid number. Please reply with a valid song number.",
+                        parse_mode='Markdown'
+                    )
+                    return
         # Otherwise, treat as search query
         processing_msg = await update.message.reply_text(
             "🔍 Searching for your song or artist...",
             parse_mode='Markdown'
         )
-        results = await search_and_select_youtube(update, processing_msg, message_text)
-        if results:
-            context.user_data['yt_search_results'] = results
+        await search_and_select_youtube(update, processing_msg, message_text)
         return
-    
+
     # Quick processing message
     processing_msg = await update.message.reply_text(
         "⚡ *Processing...* \n\nThis will be fast! 🚀",
@@ -627,13 +837,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     try:
         # Fast processing based on link type
+        if 'open.spotify.com' in message_text and '/album/' in message_text:
+            album_id = message_text.split('/album/')[-1].split('?')[0]
+            album = sp.album(album_id)
+            album_name = album.get('name', 'Spotify Album')
+            # Collect all tracks with pagination
+            tracks = album['tracks']['items']
+            next_url = album['tracks']['next']
+            while next_url:
+                next_tracks = sp._get(next_url)
+                tracks.extend(next_tracks['items'])
+                next_url = next_tracks['next']
+            # Prepare results for user selection
+            user_id = update.effective_user.id
+            user_search_state[user_id] = {
+                'results': [
+                    {
+                        'url': f"https://open.spotify.com/track/{track['id']}",
+                        'title': track['name'],
+                        'uploader': track['artists'][0]['name'],
+                        'duration': int(track['duration_ms']) // 1000
+                    } for track in tracks
+                ],
+                'page': 0,
+                'album_name': album_name
+            }
+            processing_msg = await update.message.reply_text(
+                f"*{album_name}*\n\nSelect tracks to download by replying with numbers (e.g. 1,2,3) or 'all' to download all.\n\nListing all {len(tracks)} tracks...",
+                parse_mode='Markdown'
+            )
+            await send_search_page(update, processing_msg, user_id)
+            return
         if 'open.spotify.com' in message_text and '/playlist/' in message_text:
-            success = await download_spotify_playlist_fast(message_text, update, processing_msg)
-            if success:
+                # Get playlist name for display
+                playlist_id = message_text.split('/playlist/')[-1].split('?')[0]
+                playlist = sp.playlist(playlist_id)
+                playlist_name = playlist.get('name', 'Spotify Playlist')
                 await processing_msg.edit_text(
-                    "✅ *Done!* \n\nSend another link! 🎧",
+                    f"🔍 Searching for *{playlist_name}*...",
                     parse_mode='Markdown'
                 )
+                success = await download_spotify_playlist_fast(message_text, update, processing_msg)
+                if success:
+                    await processing_msg.edit_text(
+                        "✅ *Done!* \n\nSend another link! 🎧",
+                        parse_mode='Markdown'
+                    )
         elif 'open.spotify.com' in message_text and '/track/' in message_text:
             success = await download_spotify_track_fast(message_text, update, processing_msg)
             if success:
@@ -650,10 +899,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
         else:
             # Treat as search query
-            results = await search_and_select_youtube(update, processing_msg, message_text)
-            if results:
-                # Store results in context for next message
-                context.user_data['yt_search_results'] = results
+            await search_and_select_youtube(update, processing_msg, message_text)
     except Exception as e:
         logger.error(f"Error processing request: {e}")
         await processing_msg.edit_text(
@@ -663,49 +909,104 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_reply(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Handles user reply with song number
-    if 'yt_search_results' in context.user_data:
+    user_id = update.effective_user.id
+    if user_id in user_search_state:
+        state = user_search_state[user_id]
+        results = state['results']
+        page = state['page']
+        page_size = 10
+        start = page * page_size
+        end = start + page_size
+        page_results = results[start:end]
+        text = update.message.text.strip().lower()
         try:
-            number = int(update.message.text.strip())
-            results = context.user_data['yt_search_results']
-            if 1 <= number <= len(results):
-                entry = results[number-1]
-                url = entry.get('url')
-                name = entry.get('title', 'Unknown')
-                artist = entry.get('uploader', 'Unknown Artist')
-                duration = entry.get('duration', 0)
-                msg = await update.message.reply_text(
-                    f"⬇️ Downloading `{name}` by {artist} ({duration//60}:{duration%60:02d} min)...",
-                    parse_mode='Markdown'
-                )
-                # Download and send
-                with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_file:
-                    output_path = tmp_file.name
-                success = await run_in_executor(download_audio_fast, url, output_path)
-                if success:
-                    with open(output_path, 'rb') as audio_file:
-                        await update.message.reply_audio(
-                            audio=audio_file,
-                            title=name[:64],
-                            performer=artist[:64],
-                            caption=f"🎵 *{name}* by {artist}",
-                            parse_mode='Markdown',
-                            filename=f"{sanitize_filename(artist)} - {sanitize_filename(name)}.mp3"
-                        )
-                    try:
-                        os.unlink(output_path)
-                    except:
-                        pass
-                await msg.edit_text(
-                    f"✅ *Done!* \n\nSend another name or link! 🎧",
-                    parse_mode='Markdown'
-                )
-                # Clear search results
-                context.user_data.pop('yt_search_results', None)
-            else:
-                await update.message.reply_text(
-                    "❌ Invalid number. Please reply with a valid song number.",
-                    parse_mode='Markdown'
-                )
+            # Download all
+            if text == 'all':
+                for entry in results:
+                    url = entry.get('url')
+                    name = entry.get('title', 'Unknown')
+                    artist = entry.get('uploader', 'Unknown Artist')
+                    duration = int(entry.get('duration', 0) or 0)
+                    msg = await update.message.reply_text(
+                        f"⬇️ Downloading `{name}` by {artist} ({duration//60}:{duration%60:02d} min)...",
+                        parse_mode='Markdown'
+                    )
+                    with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_file:
+                        output_path = tmp_file.name
+                    success = await run_in_executor(download_audio_fast, url, output_path)
+                    if success:
+                        with open(output_path, 'rb') as audio_file:
+                            await update.message.reply_audio(
+                                audio=audio_file,
+                                title=name[:64],
+                                performer=artist[:64],
+                                caption=f"🎵 *{name}* by {artist}",
+                                parse_mode='Markdown',
+                                filename=f"{sanitize_filename(artist)} - {sanitize_filename(name)}.mp3"
+                            )
+                        try:
+                            os.unlink(output_path)
+                        except:
+                            pass
+                    await msg.edit_text(
+                        f"✅ *Done!* \n\nSend another name or link! 🎧",
+                        parse_mode='Markdown'
+                    )
+                del user_search_state[user_id]
+                return
+            # Discard
+            if text == 'discard':
+                del user_search_state[user_id]
+                await update.message.reply_text("Search discarded. Send a new song or artist name.")
+                return
+            # Next page
+            if text.isdigit():
+                number = int(text)
+                if number == len(page_results)+1 and end < len(results):
+                    state['page'] += 1
+                    processing_msg = await update.message.reply_text("Next page...", parse_mode='Markdown')
+                    await send_search_page(update, processing_msg, user_id)
+                    return
+                # Download single
+                if 1 <= number <= len(page_results):
+                    entry = page_results[number-1]
+                    url = entry.get('url')
+                    name = entry.get('title', 'Unknown')
+                    artist = entry.get('uploader', 'Unknown Artist')
+                    duration = int(entry.get('duration', 0) or 0)
+                    msg = await update.message.reply_text(
+                        f"⬇️ Downloading `{name}` by {artist} ({duration//60}:{duration%60:02d} min)...",
+                        parse_mode='Markdown'
+                    )
+                    with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_file:
+                        output_path = tmp_file.name
+                    success = await run_in_executor(download_audio_fast, url, output_path)
+                    if success:
+                        with open(output_path, 'rb') as audio_file:
+                            await update.message.reply_audio(
+                                audio=audio_file,
+                                title=name[:64],
+                                performer=artist[:64],
+                                caption=f"🎵 *{name}* by {artist}",
+                                parse_mode='Markdown',
+                                filename=f"{sanitize_filename(artist)} - {sanitize_filename(name)}.mp3"
+                            )
+                        try:
+                            os.unlink(output_path)
+                        except:
+                            pass
+                    await msg.edit_text(
+                        f"✅ *Done!* \n\nSend another name or link! 🎧",
+                        parse_mode='Markdown'
+                    )
+                    del user_search_state[user_id]
+                    return
+                else:
+                    await update.message.reply_text(
+                        "❌ Invalid number. Please reply with a valid song number.",
+                        parse_mode='Markdown'
+                    )
+                    return
         except Exception as e:
             logger.error(f"Error handling reply: {e}")
             await update.message.reply_text(
@@ -735,10 +1036,28 @@ def main():
     application.add_handler(MessageHandler(filters.TEXT & filters.REPLY, handle_reply))
     from telegram.ext import CallbackQueryHandler
     async def discard_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        context.user_data.pop('yt_search_results', None)
+        user_id = update.effective_user.id
+        user_search_state.pop(user_id, None)
         await update.callback_query.answer()
         await update.callback_query.edit_message_text("Search discarded. Send a new song or artist name.")
+
+    async def next_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if user_id in user_search_state:
+            user_search_state[user_id]['page'] += 1
+            await update.callback_query.answer()
+            await send_search_page(update, update.callback_query.message, user_id)
+
+    async def prev_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        if user_id in user_search_state and user_search_state[user_id]['page'] > 0:
+            user_search_state[user_id]['page'] -= 1
+            await update.callback_query.answer()
+            await send_search_page(update, update.callback_query.message, user_id)
+
     application.add_handler(CallbackQueryHandler(discard_callback, pattern="^discard_search$"))
+    application.add_handler(CallbackQueryHandler(next_page_callback, pattern="^next_page$"))
+    application.add_handler(CallbackQueryHandler(prev_page_callback, pattern="^prev_page$"))
     application.add_error_handler(error_handler)
     print("🎵 FAST Music Downloader Bot is running...")
     print("⚡ Optimized for speed!")
