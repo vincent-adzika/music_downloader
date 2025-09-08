@@ -71,10 +71,15 @@ SPOTIFY_CLIENT_SECRET = os.environ.get('SPOTIFY_CLIENT_SECRET')
 # Set up Spotify client
 def setup_spotify_client():
     """Set up and return Spotify client"""
+    # Create a dedicated cache folder for Spotipy token
+    # Remove cache_path, use default Spotipy client credentials (no persistent cache)
     auth_manager = SpotifyClientCredentials(
         client_id=SPOTIFY_CLIENT_ID,
         client_secret=SPOTIFY_CLIENT_SECRET
     )
+    # Silence Spotipy cache warnings
+    import logging
+    logging.getLogger('spotipy.cache_handler').setLevel(logging.ERROR)
     return spotipy.Spotify(auth_manager=auth_manager)
 
 # Initialize Spotify client
@@ -286,11 +291,12 @@ async def download_spotify_track_fast(track_url, update, processing_msg):
                 f"❌ *Sorry, I couldn't find* \n`{query}`",
                 parse_mode='Markdown'
             )
-            return False
-        await processing_msg.edit_text(
+        # Use NamedTemporaryFile for temp files, no persistent temp folder needed
+        with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_file:
+            output_path = tmp_file.name
             f"⬇️ Downloading `{track_info['name']}` by {track_info['artist']}... Please wait, this may take a while.",
             parse_mode='Markdown'
-        )
+        
         with tempfile.NamedTemporaryFile(suffix='.mp3', delete=False) as tmp_file:
             output_path = tmp_file.name
         success = await run_in_executor(download_audio_fast, youtube_url, output_path, track_info)
@@ -609,6 +615,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         artist_id = message_text.split('/artist/')[-1].split('?')[0]
         artist = sp.artist(artist_id)
         artist_name = artist.get('name', 'Spotify Artist')
+        # Notify user that the artist link is being processed
+        processing_msg = await update.message.reply_text(
+            f"🔍 Processing artist link for *{artist_name}*...\nPlease wait while I fetch all tracks from albums and singles.",
+            parse_mode='Markdown'
+        )
         # Get all albums (album, single, compilation)
         albums = []
         seen_album_ids = set()
@@ -647,7 +658,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             'page': 0,
             'artist_name': artist_name
         }
-        processing_msg = await update.message.reply_text(
+        await processing_msg.edit_text(
             f"*{artist_name}*\n\nSelect tracks to download by replying with numbers (e.g. 1,2,3) or 'all' to download all.\n\nListing all {len(all_tracks)} tracks from all albums and singles...",
             parse_mode='Markdown'
         )
